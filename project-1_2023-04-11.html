@@ -1,0 +1,176 @@
+<p>Project 1 should be done in groups of two or individually.</p>
+<p>You should do the Wireshark labs in Homework 1 before attempting this project.</p>
+<p>This assignment was originally developed by Prof. Peter Dinda, but I have modified it in several ways.</p>
+<h2>Overview</h2>
+<p>In this part of the project, your group will build a simple web client and a&nbsp;web server to which it can connect.&nbsp; The goal is to slowly introduce you to Unix socket programming, and the HTTP protocol, which is the most important network application protocol on the Internet.&nbsp; You should develop the&nbsp;client and server in Python.</p>
+<p>Notice that I am not asking you to build&nbsp;a web&nbsp;<strong>page </strong>or <strong>application</strong>, but&nbsp;a web <strong>server</strong>.&nbsp; Website developers normally deploy their pages/apps on an existing web server framework such as Apache, Node.js, Django, Tomcat, Microsoft IIS, etc.&nbsp; You'll be building such a web server from scratch, and in the process you will learn about HTTP and low-level network programming.</p>
+<h3>Coding</h3>
+<p>Your Python code must use the low-level socket API for networking and you must use the version of Python that is installed on the test machine (version 3.6).&nbsp; (More recent versions are probably also OK, but be sure to test on moore.)</p>
+<p>You must test your code on moore.wot.eecs.northwestern.edu before submitting.</p>
+<h3>HTTP and HTML</h3>
+<p>The combination of HTTP, the Hypertext Transport Protocol, and HTML, the Hypertext Markup Language, forms the basis for the World Wide Web. HTTP provides a standard way for a client to request <em>typed</em> content from a server, and for a server to return such data to the client. "Typed content" simply means a bunch of bytes annotated with information that tells us how we should interpret them (a MIME type).&nbsp; For example, the MIME type "text/html" tells us that the bytes are&nbsp;HTML&nbsp;text and the MIME type "image/jpeg" tells us that the bytes represent an image in JPEG format.&nbsp; You will implement a greatly simplified version of HTTP 1.0.</p>
+<p>HTML content provides a standard way to encode structured text that can contain pointers to other typed content. A web browser parses an HTML page, fetches all the content it refers to, and then renders the page and the additional embedded content appropriately.</p>
+<h3>HTTP Example</h3>
+<p>In this project, you will only implement HTTP, and only a tiny subset of HTTP 1.0 at that. HTTP was originally a very simple, but very inefficient protocol.&nbsp; As a result of fixing its efficiency problems, modern HTTP is considerably more complicated. It&rsquo;s current specification, <a href="https://tools.ietf.org/html/rfc2616">RFC 2616</a>, is over a hundred pages long!&nbsp; Fortunately, for the purposes of this project, we can ignore most of the specification and implement a tiny subset.&nbsp; In fact, it may be easier to refer to the older, simpler version of the&nbsp;HTTP spec&nbsp;for this assignment, <a href="https://tools.ietf.org/html/rfc1945">RFC 1945</a>.</p>
+<p>The HTTP protocol works on top of TCP, a reliable, stream-oriented transport protocol, and it uses human-readable messages. Because of these two facts, we can use the telnet program to investigate how HTTP works. We&rsquo;ll use telnet in the role of the client and insecure.stevetarzia.com in the role of the server.&nbsp; This is essentially the same as fetching <a href="http://insecure.stevetarzia.com/basic.html">http://insecure.stevetarzia.com/basic.html</a> using your favorite web browser.</p>
+<p style="padding-left: 40px;"><em>Note</em>: Most webservers nowadays require TLS encryption (HTTP<strong>S</strong>) on the connection.&nbsp; That's a good thing, but it would add a lot of complexity to this assignment.&nbsp; We are testing with "insecure.stevetarzia.com" because that is a webserver that I configured specially to <strong>not</strong> require encryption.</p>
+<pre>[spt175@moore ~]$ <span style="background-color: #ffff00;">telnet insecure.stevetarzia.com 80</span><br />Trying 54.245.121.172...<br />Connected to stevetarzia.com.<br />Escape character is '^]'.<br /><span style="background-color: #ffff00;">GET /basic.html HTTP/1.0</span><br /><span style="background-color: #ffff00;">Host: insecure.stevetarzia.com</span>
+
+HTTP/1.1 200 OK<br />Date: Wed, 08 Jan 2020 13:10:56 GMT<br />Server: Apache/2.2.34 (Amazon)<br />Last-Modified: Tue, 07 Jan 2020 23:59:54 GMT<br />ETag: "2770e-65-59b959285347f"<br />Accept-Ranges: bytes<br />Content-Length: 101<br />Connection: close<br />Content-Type: text/html; charset=UTF-8<br /><br />&lt;!DOCTYPE html&gt;<br />&lt;html&gt;<br />&lt;body&gt;<br /><br />&lt;h1&gt;My First Heading&lt;/h1&gt;<br />&lt;p&gt;My first paragraph.&lt;/p&gt;<br /><br />&lt;/body&gt;<br />&lt;/html&gt;<br />Connection closed by foreign host.<br />[spt175@moore ~]$</pre>
+<p>Above, I just ran the command "telnet insecure.stevetarzia.com 80" then I typed "GET /basic.html HTTP/1.0" pressed return, typed "Host: insecure.stevetarzia.com" and pressed "return" <strong>twice</strong> to send a two-line HTTP request to the server.&nbsp; The telnet command just creates a TCP connection to the specified server and port (port 80 is the standard HTTP port), and then it lets the client and server send text back and forth to each other.&nbsp; I specified the address with a DNS name, "www.mccormick.northwestern.edu", so the telnet program actually has to first do a DNS lookup to determine that this corresponds to IP address 129.105.1.129.</p>
+<p>Our request above said &ldquo;please give me the data at location called insecure.stevetarzia.com/basic.html using the 1.0 version of the HTTP protocol.&rdquo;&nbsp; HTTP requests can be several lines long, so the blank line at the end indicates that the request is finished.&nbsp; The TCP connection we're using provides a <em>stream</em> of data, so the server will probably receive the request in several pieces.&nbsp; Once it sees the blank line, it knows that it has the full request and it can proceed in handling it.</p>
+<p>The response always begins with a line that states the version of the protocol that the server speaks (&ldquo;HTTP/1.1&rdquo; in this case), a response code (&ldquo;200&rdquo;), and a textual description of what that error code means (&ldquo;OK&rdquo;).&nbsp; If we had specified an invalid url, like "GET /blargh HTTP/1.0" then the server would has responded with a "404 Not Found" response code.&nbsp; (Please try it out!)&nbsp; After the status line, the server provides a bunch of information about the content it is about the send as well as information about itself and what kinds of services it can provide. The most critical lines here are &ldquo;Content-Length: 101&rdquo;, which tells us that the content will consist of 101 bytes, and &ldquo;Content-Type: text/html&rdquo;, which tells us how to interpret the content we shall receive. A blank line marks the end of the response header and the beginning of the actual content (the body).&nbsp; After the content has been sent, this server has chosen to close the connection (although it's not required).</p>
+<p style="padding-left: 40px;"><em>Note</em>: The "Content-Length: 101" response header is important because there is no clear way for the client to know when the received data is finished.&nbsp; This is especially true if the server is planning to leave the connection open so the client can make another HTTP request.&nbsp; The HTTP 1.0 protocol does allow the server to omit the Content-Length header, but only if it closes the connection when the transfer is completed.</p>
+<h2>Part 1: a simple curl clone</h2>
+<p>This part is worth 30% of the total grade, if completed correctly.</p>
+<p>You will implement a simple command-line HTTP client, implemented using the BSD socket interface.&nbsp; Throughout all the parts of this assignment, you must use Python's "socket" package and no other (higher-level) network library.&nbsp; For example, you <strong>cannot</strong> use "urllib" even though it's part of the standard Python library.</p>
+<p>Like a simplified version of the unix "curl" command, your program should take just one parameter, which is an http web address to fetch.&nbsp; If successful, if should print the body of the response (the html code) to stdout.</p>
+<p>For example, you might invoke it as follows:</p>
+<pre>$ python3 http_client.py http://somewebsite.com/path/page.htm</pre>
+<p>And it would print out the HTML for that page.&nbsp;</p>
+<p>Additionally, you must follow these rules:</p>
+<ul>
+<li>Only the <strong>body </strong>of the response (excluding the header) should be printed to <strong>stdout</strong>.&nbsp; If you want to print any other messages, they should be printed to <strong>stderr</strong>.</li>
+<li>All requests are assumed to&nbsp;use the HTTP "GET" method (you do not have to support POST or anything else).</li>
+<li>Your client must include a "Host: ..." header.&nbsp; This is necessary because some web servers handle multiple domains.</li>
+<li>Your program should return a Unix exit code (using <strong>sys.exit</strong>) to indicate whether the request is successful or not. It should return a Unix exit code of 0 on success (meaning that you eventually get a "200 OK" response with valid HTML) and non-zero on failure.</li>
+<li>Your client should understand and follow 301 and 302 redirects.&nbsp; When you get a redirect, your client should make another request to fetch the corrected url.&nbsp; Your client should also print&nbsp;a message to <strong>stderr</strong> with the format: "Redirected to: <a href="http://other.com/blah%22">http://other.com/blah</a>" &nbsp;<em>(The specific url should be shown)</em>.
+<ul>
+<li>An example of a url with a 301 permanent redirect is:<br /><a href="http://airbedandbreakfast.com/">http://airbedandbreakfast.com/</a>&nbsp;(which redirects to&nbsp;<a href="https://www.airbnb.com/belong-anywhere">https://www.airbnb.com/belong-anywhere</a>)</li>
+<li>An example of a&nbsp;url with a 302 temporary redirect is:<br /><a href="http://maps.google.com/">http://maps.google.com/</a>&nbsp;(which redirects to&nbsp;<a href="http://maps.google.com/maps,%20">http://maps.google.com/maps</a>, which redirects to&nbsp;<a href="https://www.google.com:443/maps">https://www.google.com:443/maps</a>)</li>
+<li>Another example&nbsp;is:<br /><a href="http://insecure.stevetarzia.com/redirect">http://insecure.stevetarzia.com/redirect </a>which redirects to&nbsp;<a href="http://insecure.stevetarzia.com/basic.html">http://insecure.stevetarzia.com/basic.html</a> Unlike the google and airbnb links above, the final destination is not encrypted with HTTPS, so your program should be able to print the HTML without any fancy cryptography code.</li>
+<li>You must handle a chain of multiple redirects (like the above), but give up after 10 redirects and return a non-zero exit code.&nbsp; For example, fetching the following page should not loop infinitely, but return a non-zero exit code:<br /><a href="http://insecure.stevetarzia.com/redirect-hell">http://insecure.stevetarzia.com/redirect-hell</a>&nbsp;</li>
+</ul>
+</li>
+<li>If you try to visit a http<span style="color: #993300;"><strong>s</strong></span> page (note the added "s" for "secure" which means that it requiring encryption) or if you are redirected to an https page, just print an error message to <strong>stderr</strong> and return a non-zero exit code.</li>
+<li>If you get an HTTP response code &gt;= 400, then you should return a non-zero exit code, but also print the response body to <strong>stdout</strong>, if any.
+<ul>
+<li>For example, the following page returns a 404 response:<br /><a href="http://cs.northwestern.edu/340">http://cs.northwestern.edu/340</a>&nbsp;</li>
+</ul>
+</li>
+<li>Check the response's content-type header.&nbsp; Print the body to stdout only if the content-type begins with "text/html".&nbsp; Otherwise, exit with a non-zero exit code.</li>
+<li>Return a non-zero exit code if the input url does not start with "http://"</li>
+<li>Allow request urls to include a port number.
+<ul>
+<li>For example:&nbsp;<a href="http://portquiz.net:8080/">http://portquiz.net:8080/</a></li>
+</ul>
+</li>
+<li>You should not require a slash at the end of top-level urls.&nbsp; For example, both of the following urls should work: <a href="http://insecure.stevetarzia.com">http://insecure.stevetarzia.com</a> and <a href="http://insecure.stevetarzia.com/">http://insecure.stevetarzia.com/</a>&nbsp;</li>
+<li>You should be able to handle large&nbsp;pages,&nbsp;such as:&nbsp;<a href="http://insecure.stevetarzia.com/libc.html">http://insecure.stevetarzia.com/libc.html</a> &nbsp;</li>
+<li>Your client should run quickly.&nbsp; In other words, it should not use timeouts to determine when the response it fully transferred.</li>
+<li>Your client should work even if the Content-Length header is missing.&nbsp; In this case, you should just read body data until the server closes the connection.&nbsp; This behavior is part of the HTTP/1.0 spec, so some web servers will do this.&nbsp; For example, your client should work with <a href="http://google.com">http://google.com</a>.&nbsp;</li>
+</ul>
+<h2>Part 2: a simple web server</h2>
+<p>This part is worth 30% of the total grade, if completed correctly.</p>
+<p>As above, you must implement this using low-level BSD sockets in Python.</p>
+<p>Write an HTTP server that handles one connection at a time and that serves any files in the current directory if their name ends with&nbsp; .html or .htm.&nbsp; To prepare for this assignment, download the sample html file&nbsp;<a class="instructure_file_link" title="rfc2616.html" href="https://canvas.northwestern.edu/courses/119755/files/9351237/download?wrap=1" data-api-endpoint="https://canvas.northwestern.edu/api/v1/courses/119755/files/9351237" data-api-returntype="File">rfc2616.html</a> and save it to your working directory.&nbsp; The command-line interface for your server will be</p>
+<pre>$ python3 http_server1.py [port]</pre>
+<p>Where "port" is a port number &gt;= 1024.&nbsp; You will then be able to use http_client, telnet, curl, or any web browser, to fetch files from your server.&nbsp; However, please be aware that there is a firewall on moore (the test machine) that blocks network access from the outside world.&nbsp; If, for example, you run your server on moore.wot.eecs.northwestern.edu on port 10002, then you can test your server by running the following command on another SSH session on moore:</p>
+<pre>$ curl http://moore.wot.eecs.northwestern.edu:10002/rfc2616.html</pre>
+<p>It is important to note that you will not be able to use port 80.&nbsp; Port numbers less than 1024 are reserved, and you need special permissions to bind to them.&nbsp; The firewall will block access to moore's high ports if you are not on the Northwestern wired campus network.</p>
+<p>Your server should have the following structure:</p>
+<ol>
+<li>Create a TCP socket on which to listen for new connections. (What packet family and type should you use?)</li>
+<li>Bind that socket to the port provided on the command line. We&rsquo;ll call this socket the "accept socket."&nbsp; Please&nbsp;listen on all IP addresses on the machine by choosing&nbsp;"" as the listening address.</li>
+<li>Listen on the accept socket. (What will happen if you use a small backlog versus a larger backlog? What if you set the backlog to zero?)</li>
+<li><strong>Do the following repeatedly:</strong></li>
+</ol>
+<p style="padding-left: 30px;">a. Accept a new connection on the accept socket. (When does accept return?&nbsp;Is your process consuming cycles while it is in accept?) Accept will return a new socket for the connection. We&rsquo;ll call this new socket the "connection socket." (What is the 5-tuple describing the connection?)</p>
+<p style="padding-left: 30px;">b. Read the HTTP request from the connection socket and parse it. (How do you know how many bytes to read?)</p>
+<p style="padding-left: 30px;">c. Check to see if the requested file requested exists (and ends with ".htm" or ".html").</p>
+<p style="padding-left: 30px;">d. If the file exists, construct the appropriate HTTP response (What&rsquo;s the<br />right response code?), write&nbsp;the HTTP header to the connection socket, and then open the file and write its contents to the connection socket (thus writing the HTTP body).</p>
+<p style="padding-left: 30px;">e. If the file doesn&rsquo;t exist, construct a HTTP error response (404 Not Found) and write it to the connection socket.&nbsp;&nbsp;If the file does exist,&nbsp;but does not end with ".htm" or "html", then&nbsp;write a "403 Forbidden" error&nbsp;response.</p>
+<p style="padding-left: 30px;">f. Close the connection socket.</p>
+<p>TIP: If you are running your server code&nbsp;locally (on your laptop), then you can use the special hostname "localhost" to refer to your own machine.&nbsp; For example, direct your browser to "http://localhost:8000/index.html".</p>
+<p>To test your server, you should make sure that a client can correctly fetch the HTML content.&nbsp; Run these commands in your working directory:</p>
+<pre>$ curl http://<em>[hostname]</em>:<em>[port]</em>/rfc2616.html &gt; copy.html # saves the output to copy.html<br />$ diff copy.html rfc2616.html # this should print nothing if the two files have no difference</pre>
+<p>Also, try to load a page with a standard browser, like Chrome.&nbsp; If you have done everything correctly, Chrome will render your version of the page exactly as we see it on the IETF's website: <a href="https://tools.ietf.org/html/rfc2616">https://tools.ietf.org/html/rfc2616</a>.</p>
+<h2>Part 3: multi-connection web server</h2>
+<p>This part is worth 30% of the total grade, if completed correctly</p>
+<p>The server you wrote for part 2 can handle only one connection at a time. To illustrate the problem, try the following. Open a telnet connection to your http_server1 and type nothing. Now make a request to your server using a browser. What happens? If the connection request is refused, try increasing the backlog you specified for listen in http_server1 and then try again. After http_server1 accepts a connection, it blocks&nbsp;(stalls) while reading the request and&nbsp;thus is unable to accept another connection. Connection requests that arrive during this time are either queued, if the listen queue (whose size you specified using listen) is not full, or refused, if it is.</p>
+<p>Consider what happens if the current connection is very slow,&nbsp;for example&nbsp;if it is running over a weak cellular signal. Your server is spending most of its time idle waiting for this slow connection while other connection requests are being queued or refused. Reading the request is only one place where http_server1 can block. It can also block on waiting for a new connection, on reading data from a file, and on writing that data to the socket.</p>
+<p>Write an HTTP server, http_server2, that avoids&nbsp;two of these situations: (1) waiting for a connection to be established, and (2) waiting on the read after a connection has been established. You can make the following assumptions:</p>
+<ul>
+<li>
+<p>If you can read one byte from the socket without blocking, you can read the whole request without blocking.</p>
+</li>
+<li>
+<p>Reads on the file will never block</p>
+</li>
+<li>
+<p>Writes will never block</p>
+</li>
+</ul>
+<p>It is important to note that if you have no connections with new data available and&nbsp;no&nbsp;new connections just established, then you should block.</p>
+<p>To support multiple connections at a time in http_server2, you will need to do two things:</p>
+<ul>
+<li>
+<p>Explicitly maintain the state of each open connection</p>
+</li>
+<li>
+<p>Block on multiple sockets, file descriptors, events, etc.</p>
+</li>
+</ul>
+<p>It is up to you to decide what the contents of the state of a connection are and how you will maintain them. However, Unix, as well as most other operating systems, provides a mechanism for waiting on multiple events. The Unix mechanism is the <em><strong>select</strong></em> system call.&nbsp; If you have not taken an Operating Systems course, then&nbsp;the term "system call" may be unfamiliar.&nbsp; System calls are&nbsp;special functions that allows a process to ask the OS to do something on its behalf.&nbsp; For the purposes of this assignment, just think of "select" as a library function, like "printf".</p>
+<p>"<em>Select</em>" allows us to wait for one or more file descriptors (a socket is a kind of file descriptor) to become available for reading (so that at least one byte can be read without blocking), writing (so that at least one byte can be written without blocking), or to have an exceptional condition happen (so that the error can be handled). In addition, <em>select</em> can also wait for a certain amount of time to pass.&nbsp; You can read about <em>select</em> here: <a href="https://pymotw.com/3/select/">https://pymotw.com/3/select/</a>.</p>
+<p>Your server should have the following structure:</p>
+<ol>
+<li>
+<p>Create a TCP socket&nbsp;on which to listen for new connections</p>
+</li>
+<li>
+<p>Bind that socket to the port provided on the command line.</p>
+</li>
+<li>
+<p>Listen on that socket, which we shall call the "accept socket."</p>
+</li>
+<li>
+<p>Initialize the list of open connections to empty</p>
+</li>
+<li>
+<p>Do the following<strong> repeatedly:</strong></p>
+</li>
+</ol>
+<p style="padding-left: 30px;">a. Make a list of the sockets we are waiting to read from the list of open connections. We shall call this the "read list."&nbsp; In our case, it's simply the list of all open connections.</p>
+<p style="padding-left: 70px;"><em>Note</em>: A more sophisticated solution (beyond the scope of this assignment), would also do the reading of files from disk in a non-blocking way using&nbsp;<em>select</em>.&nbsp; In that case, the read list would also include a list of files that we were in the process of reading data from.&nbsp; In this assignment we assume that file data can be read immediately, without an impact on performance, but that is not really true in practice.</p>
+<p style="padding-left: 30px;">b. Add the accept socket to the read list. Having a new connection arrive on this socket makes it available for reading, it&rsquo;s just that we use a strange kind of read, the <em>accept</em> call, to do the read.</p>
+<p style="padding-left: 30px;">c. Call <em>select</em> with the read list. Your program will now block until one of the sockets on the read list is ready to be read.</p>
+<p style="padding-left: 30px;">d. For each socket on the read list that <em>select</em> has marked readable, do the following:</p>
+<p style="padding-left: 60px;">i. If it is the accept socket, accept the new connection and add it to the list of open connections with the appropriate state</p>
+<p style="padding-left: 60px;">ii. If it some other socket, performs steps 4.b through 4.f from the description of http_server1 in Part 2.&nbsp; After closing the socket, delete it from the list of open connections.</p>
+<p>Test your server using telnet and curl (or a web browser) as described above, to see whether it really handles two simultaneous connections.</p>
+<p>Your server should also be robust. If a request is empty or does not start with "GET", your server should just ignore it.</p>
+<h2>Part 4: dynamic web server</h2>
+<p>This part is worth 10% of the total grade, if completed correctly</p>
+<p>Implement an "http_server3.py" which implements a JSON-based API for simple multiplication.&nbsp;</p>
+<p>The request url will encode a math problem to solve by using what are called "<a href="https://launchschool.com/books/http/read/what_is_a_url">query parameters</a>" in the url.&nbsp; Here's an example request:</p>
+<p>GET /product?a=12&amp;b=60&amp;another=0.5</p>
+<p>The response should have "Content-Type: application/json" and the response body should be a json object like:</p>
+<pre>{<br />    "operation": "product",<br />    "operands": [12, 60, 0.5],<br />    "result": 360<br />}</pre>
+<p>Additional notes:</p>
+<ul>
+<li>You should use the built-in <a href="https://docs.python.org/3/library/json.html">json python library </a>to generate the response.</li>
+<li>Notice that in this particular application the names of the query parameters are unimportant and are ignored (above, the parameters were named "a", "b", and "another").</li>
+<li>We will not be testing multiple simultaneous connections, so you can base the code on Part 2 if you wish.</li>
+<li>If a user requests a url other than "/product" you should return a <em>404 Not Found</em> status code.</li>
+<li>If there are no parameters to the "/product" request or if a parameter is not a number (eg., "GET /product" or "GET /product?a=blah") then you should return a <em>400 Bad Request</em> status code.</li>
+<li>Please treat the parameters as floating point numbers.&nbsp; The result can also be "inf" (infinity) or "-inf" if floating point overflow occurs.&nbsp; Notice that JSON requires us to specify "inf" as a string (with double quotes) whereas regular numbers should <strong>not</strong> have quotes.</li>
+</ul>
+<h2>Submission</h2>
+<ul>
+<li>You should work in pairs.&nbsp; List the participants (names and netids) in a README.txt file.</li>
+<li>Please make just one submission for the pair.</li>
+<li>Your code must compile and run on moore.wot.eecs.northwestern.edu.</li>
+<li>Name your source files "http_client.py", "http_server1.py", etc.</li>
+<li>You may not use any outside libraries to in your code (do not "pip install" anything).</li>
+<li>Your submission should be a .tgz file (a gzipped tarball), including a README.txt, and the python sources.&nbsp; To create the archive, use a command like the following
+<ul>
+<li>tar -czvf project1_NETID1_NETID2.tgz README.txt *.py</li>
+<li>Notice that I'm including both partners' netids in the filename.&nbsp;</li>
+</ul>
+</li>
+<li>Remember that you should leave a comment explaining any bits of code that you copied from the Internet (just in case two groups copy the same code from the Internet, we won't think that you copied each other directly).</li>
+<li>After you make your tarball, copy it to a temporary folder, extract it, compile it, and test it again to make sure you included everything.</li>
+</ul>
+<h3>Sharing files with your partner using git</h3>
+<p>I recommend that you create a git repository for your code and use <a href="https://bitbucket.org">Bitbucket</a>&nbsp;to share the repository with your partner.&nbsp; Each of you will be able to work on your own copy of the code, and periodically push updates to the central repository.&nbsp; I recommend Bitbucket instead of Github because private repositories are free on Bitbucket (and it would be a violation of our cheating policy to post your code on a public repository).</p>
