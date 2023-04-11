@@ -112,13 +112,13 @@ def socket_receive(s):
     chunks = []
     cnt = 0
     while True:
+        print(s)
         chunk = s.recv(4096)
-        if chunk == b"":
+        print(chunk, type(chunk))
+        if not chunk:
             break
         print_err(f" > chunk-{cnt}: {len(chunk)} bytes:")
         chunks.append(chunk)
-        if len(chunk) < 4096:
-            break
         cnt += 1
     response = b"".join(chunks)
     print_err(f"Received {len(response)} bytes")
