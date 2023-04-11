@@ -3,6 +3,7 @@ https://stevetarzia.com/teaching/340/projects/project-1.html
 Part 2: a simple web server
 """
 
+import json
 from argparse import ArgumentParser
 from datetime import datetime
 from pathlib import Path
@@ -10,7 +11,7 @@ from socket import socket, AF_INET, SOCK_STREAM
 
 from simple_curl import socket_send, socket_receive, print_err
 
-MAX_BACKLOG = 5
+MAX_BACKLOG = 1
 PHRASES = {
     200: "OK",
     301: "Moved Permanently",
@@ -86,6 +87,23 @@ def main(port):
                 code = 200
                 with open(p, "r") as f:
                     data = f.read()
+
+            # product api
+            elif uri.startswith("/product"):
+                try:
+                    params = uri.split("?")[-1]
+                    params = params.split("&")
+                    operands = [float(p.split("=")[-1]) for p in params]
+                    result = operands[0]
+                    for i in operands[1:]:
+                        result *= i
+                    mime = "application/json"
+                    code = 200
+                    data = json.dumps({"operation": "product", "operands": operands, "result": result})
+                except:
+                    mime = None
+                    code = 400
+                    data = None
 
             # 403 Forbidden
             elif p.is_file():

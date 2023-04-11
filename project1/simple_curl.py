@@ -66,6 +66,7 @@ def http_get(url, port, page):
     with socket(AF_INET, SOCK_STREAM) as s:
         s.connect((url, port))
         socket_send(s, header)
+        s.shutdown(1)
         response = socket_receive(s)
 
     try:
@@ -94,13 +95,13 @@ def http_get(url, port, page):
 
 
 def socket_send(s, payload):
-    print_err("\nSending message...")
+    print_err("\nSending data...")
     totalsent = 0
     cnt = 0
     while totalsent < len(payload):
         sent = s.send(payload.encode()[totalsent:])
         if sent == 0:
-            raise RuntimeError("Socket connection broken")
+            break
         print_err(f" > chunk-{cnt}: {sent} bytes:")
         totalsent += sent
         cnt += 1
@@ -108,13 +109,11 @@ def socket_send(s, payload):
 
 
 def socket_receive(s):
-    print_err("\nReceiving response...")
+    print_err("\nReceiving data...")
     chunks = []
     cnt = 0
     while True:
-        print(s)
         chunk = s.recv(4096)
-        print(chunk, type(chunk))
         if not chunk:
             break
         print_err(f" > chunk-{cnt}: {len(chunk)} bytes:")
