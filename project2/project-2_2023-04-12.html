@@ -1,0 +1,159 @@
+<h2>Overview</h2>
+<p>In this assignment, you will design a reliable streaming transport protocol on top of UDP.&nbsp; Essentially, you are building a simplified version of TCP.</p>
+<ul>
+<li>Part 1 will deal with <strong>chunking</strong> (breaking the stream into packets).</li>
+<li>Part 2 will deal with packet <strong>reordering</strong>.</li>
+<li>Part 3 will implement a simplified solution to deal with packet <strong>loss</strong> (with stop-and-wait ACKnowledgements and retransmissions).</li>
+<li>Part 4 will deal with data <strong>corruption</strong> errors (with hashes).</li>
+<li>Part 5 will introduce <strong>pipelining</strong> to improve performance.</li>
+<li>The Extra Credit will let you compete to pass the tests as efficiently as possible.</li>
+</ul>
+<p>You may work alone or in a group of two.</p>
+<p>For all this class' projects, I strongly recommend that you write and run your code using <a href="https://www.jetbrains.com/pycharm/">Pycharm</a> (or another Python IDE).&nbsp; This will give you powerful debugging tools, like breakpoints and expression evaluation.&nbsp; After the code works on your machine, copy it to moore.wot.eecs.northwestern.edu for the final test (there should be no surprises there).</p>
+<p>Run "git commit -a" when you are done with each part of the assignment.&nbsp; Committing your working intermediate code will allow you to experiment freely with drastic changes while being able to examine the differences you've introduced ("git diff") and to roll back to the previous version (using "git reset --hard").&nbsp; If you're new to git, then it would also be a good idea to save a backup copy of your Streamer.py to another folder each time you complete a part.</p>
+<h2>Part 0: The Skeleton Code</h2>
+<p>Clone the following git repository, which will give you the framework for this assignment:</p>
+<p><a href="https://github.com/starzia/reliable-transport-sim">https://github.com/starzia/reliable-transport-sim</a></p>
+<p>This is written in Python 3 and includes just three simple files:</p>
+<ol>
+<li><strong>lossy_socket.py</strong> provides the class LossyUDP, which is a subclass of Python's BSD socket class.&nbsp; This class gives us a UDP socket with simulated packet loss, corruption, and out-of-order delivery.&nbsp; You <strong>should not&nbsp;</strong>modify this file, but it may be helpful to read it to understand how it works.&nbsp; Your code will call four functions in this file: the LossyUDP constructor, LossyUDP#<strong>sendto,</strong>&nbsp;LossyUDP#<strong>recvfrom</strong>, and in Part 3 it will also call LossyUDP#<strong>stoprecv.</strong></li>
+<li><strong>streamer.py</strong> provides a skeleton for the Streamer class which you will implement for this project.&nbsp; It will implement a reliable streaming transport protocol (similar to TCP).&nbsp; Like TCP, it provides a simple interface to applications, but internally it must manage several complex details.&nbsp; You must add your implementation code to streamer.py, however you may <strong>not</strong> change the existing function signatures (declarations) for the Streamer constructor, Streamer#<strong>send</strong>, Streamer#<strong>recv</strong>, and Streamer#<strong>close.&nbsp; </strong>The grading scripts (and the provided test.py) will expect to interact with Streamer using the functions already defined.</li>
+<li><strong>test.py</strong> is a simple tester.&nbsp; This is an example of an application using our new streaming transport protocol.&nbsp; As written, it will test Part 1.&nbsp; After you have cloned the repository, the first part of the test will pass, but it will fail when host2 tries to send a very large chunk of data.&nbsp; Notice the line with "loss_rate=0.0, corruption_rate=0.0, max_delivery_delay=0.0".&nbsp; You may change these values to test later parts of the project.&nbsp; This tester is just meant to get you started.&nbsp; You should write more tests.</li>
+</ol>
+<p>I suggest you start by running the tester.&nbsp; Open two terminals.&nbsp; In the first terminal run:</p>
+<pre style="padding-left: 40px;">$ <span class="s1">python3 test.py 8000 8001 1</span></pre>
+<p>In the second terminal run:</p>
+<pre style="padding-left: 40px;">$ <span class="s1">python3 test.py 8000 8001 2<br /></span></pre>
+<p>You should see that the two instances of the test program communicate the numbers counting from 0 to 999 by sending a series of small packets.&nbsp; These small messages flow from Instance 2 to Instance 1.&nbsp; After this finishes, the program will try to communicate the same numbers in the reverse direction (from Instance 1 to Instance 2) but it will try to send all the numbers in one big chunk (with one call to Streamer#send).&nbsp; At this point Instance 1 will fail and Instance 2 will be stuck wait for data from Instance 1.</p>
+<p>Let's explore why it failed.&nbsp; Have a look at the <strong>streamer.py</strong> file that implements the streaming transport protocol.&nbsp; It defines the Streamer class, which has three parts:</p>
+<ol>
+<li>The <strong>constructor</strong> (__init__) takes as parameters the source ip address and port and the destination ip address and port.&nbsp; It also lets you specify parameters for the simulator to control packet loss, packet corruption, and packet delay (for reordering).</li>
+<li>The <strong>send</strong> function takes a parameter called "data_bytes" (which is of type "bytes") to send the next segment of the data stream.&nbsp; Notice that I am using Python's <a href="https://docs.python.org/3/library/typing.html">type hints</a> to document the function signature.&nbsp; The initial implementation of Streamer#send just passes the raw message to the LossyUDP socket.&nbsp; That works fine in the first half of the test because messages are small, but once messages exceeded 1472 bytes this caused an error.<br /><em>In Part 1</em> you must modify this function to break the data_bytes into chunks small enough to be handled by LossyUDP#sendto.&nbsp; You will also change this function in the later parts.</li>
+<li>The <strong>recv</strong> function takes no parameters and it returns an object of type "bytes" when the next segment of the data stream has arrived.&nbsp; The initial implementation of Streamer#recv just calls LossyUDP#recvfrom and it passes the data received from the UDP socket directly to the caller (the application).<br /><em>In Part 2</em> you must modify this function to check the sequence number of the segment before delivering it, and later parts will add more complexities.</li>
+<li>The <strong>close</strong> function is called when the application is finished sending data.&nbsp; This allows you to do any cleanup that may be necessary.&nbsp; Please notice that LossyUDP#stoprecv can be called to cancel a blocking call to LossyUDP#recvfrom.</li>
+</ol>
+<h2>Part 1: Chunking</h2>
+<h4>(20% of the grade)</h4>
+<p>Allow Streamer#send to support data larger than 1472 bytes.&nbsp; Break the data_bytes into chunks and send the data in multiple packets.&nbsp; The provided tester.py should pass after you implement chunking.</p>
+<p>Once you have a working solution to each part, I recommend that you do a "git commit -a" and then develop the next part on top of the previous solution.&nbsp; Each part builds on the prior part, and you will submit one final solution implementing all parts.</p>
+<h2>Part 2: Reordering</h2>
+<h4>(20% of the grade)</h4>
+<p>Start by changing test.py to set max_delivery_delay=0.1.&nbsp; Packets will be delayed a random amount (in this case, up to 0.1 seconds) before delivery.&nbsp; This will cause packets to be reordered.</p>
+<p>Your task in Part 2 is to make Streamer tolerate this reordering by adding <strong>sequence numbers</strong> and a <strong>receive buffer</strong>.&nbsp; You will have to add a segment <strong>header</strong> to store the sequence numbers.&nbsp; You may find it helpful to use the <a href="https://docs.python.org/3/library/struct.html">struct</a> library for headers.</p>
+<h2>Part 3: Packet Loss (with stop and wait)</h2>
+<h4>(30% of the grade)</h4>
+<p>Your task in Part 3 is to make Streamer tolerate this packet loss by adding <strong>ACKs, timeouts,</strong> and <strong>retransmissions</strong>.&nbsp; However, we will make your job easier by allowing you to limit your Streamer to sending one packet at a time (your code will <em>stop and wait</em> for an ACK after sending each packet).&nbsp; This will lead to very slow performance, which you will fix later in Part 5.</p>
+<p>Even with the stop-and-wait simplification, this part of the project will involve many changes.&nbsp; I suggest that you break your implementation into three stages:</p>
+<ul>
+<li><strong>Stage A</strong>: Listen in a background thread.&nbsp; Verify that you still pass the tests from Part 2 (loss_rate=0 and max_delivery_delay=0.1).</li>
+<li><strong>Stage B</strong>: Add ACKs (although we don't need them yet because packets are not being dropped).&nbsp; Again, verify that you still pass the tests from Part 2.</li>
+<li><strong>Stage C</strong>: Add timeouts and retransmissions.&nbsp; Set loss_rate=0.1 so that 10% of sent packets (whether data or ACKs) will be discarded instead of delivered.&nbsp;</li>
+</ul>
+<h3>Stage A (background listener):</h3>
+<p>In this stage, you should create a background <strong>thread</strong> that listens continuously for new packets in an infinite loop.&nbsp; This will prepare us for Stage B.</p>
+<h4 style="padding-left: 40px;">About <strong>blocking </strong>and<strong> threads:</strong></h4>
+<p style="padding-left: 40px;">In an Operating Systems class you would learn that "blocking" is when the OS pauses a program's execution because it called an OS function (a "system call") that must wait for some external operation to finish before the program can proceed.&nbsp; For example, reading data from disk or waiting for data from a network connection can be blocking operations.</p>
+<p style="padding-left: 40px;">In the first project, we used the&nbsp;<strong>select</strong> function to avoid blocking on one socket when another might be ready to provide data.&nbsp; In this project, we are instead going to use <strong>threads</strong> to prevent blocking operations from blocking our entire application.&nbsp; A thread is just an execution path in a program.&nbsp; Every program starts with one thread, but you can add additional threads if you want multiple things to happen concurrently.</p>
+<p>To complete Stage A:</p>
+<ol>
+<li>Move your receive buffer into a&nbsp; "data attribute" (a.k.a. instance variable) (Eg., <tt>self.receive_buffer</tt>) so it can be shared by both threads.&nbsp;</li>
+<li>Define a function for your background thread.&nbsp; <em>Hint:</em> if a background thread experiences an exception it will die silently.&nbsp; To prevent this, you should wrap your listening in a try/catch statement like:
+<pre style="padding-left: 40px;">def listener(self):<br />    while not self.closed:  # a later hint will explain self.closed<br />        try:<br />            <span class="pl-s1">data</span><span>, </span><span class="pl-s1">addr</span> <span class="pl-c1">=</span> <span class="pl-s1">self</span><span>.</span><span class="pl-s1">socket</span><span>.</span><span class="pl-en">recvfrom</span><span>()</span><br />            # store the data in the receive buffer<br />            # ...<br />        except Exception as e:<br />            print("listener died!")<br />            print(e)</pre>
+</li>
+<li>At the end of Streamer#__init__ (the constructor), start the listener function in a background thread using <a href="https://docs.python.org/dev/library/concurrent.futures.html">concurrent futures with ThreadPoolExecutor</a>:
+<pre style="padding-left: 40px;"><span class="n">executor = ThreadPoolExecutor</span><span class="p">(</span><span class="n">max_workers</span><span class="o">=1</span><span class="p">)<br /></span><span class="o">executor.</span><span class="n">submit</span><span class="p">(self.</span><span class="n">listener</span><span class="p">)<br /></span></pre>
+</li>
+<li>As in Part 2, received data packets should be buffered.&nbsp; Calls to Streamer#recv can just pull data from the receive buffer if the next segment is available (otherwise wait for the buffer to be filled by the background thread).</li>
+<li>You'll need to add some code to Streamer#close to stop the listener thread so the program can quit.&nbsp; Do this by calling:
+<pre style="padding-left: 40px;">self.closed = True<br />self.socket.stoprecv()</pre>
+</li>
+</ol>
+<p>Do not proceed to Stage B until you can pass the tests with reordering but no packet loss.</p>
+<h3>Stage B (Add ACKs):</h3>
+<ol>
+<li>Add a header to your packet format to indicate whether a packet is data or an ACK.</li>
+<li>In your background listener, check whether the received packet was an ACK or data.&nbsp; If the received packet was an ACK, then store something that can be checked by the main thread (the next step).</li>
+<li>At the end of Streamer#send, add code that waits until an ACK has been received by the background listener.&nbsp; In other words, do not consider the&nbsp;<em>send</em> complete until after an ACK has been received.&nbsp; I suggest implementing a loop with a short sleep in between each test (the sleep reduces the CPU burden of "busy waiting") :<br /><tt>&nbsp; &nbsp;while not self.ack: time.sleep(0.01)</tt></li>
+</ol>
+<p>Do not proceed to Stage C until you can pass the tests with reordering but no packet loss.</p>
+<h3>Stage C (Timeouts and retransmissions):</h3>
+<p>Set loss_rate=0.1.&nbsp; Your tests should now hang because it waits for an ACK that won't ever arrive.&nbsp; To fix it:</p>
+<ul>
+<li>Add a timeout when waiting for ACKs.&nbsp; To simplify your implementation, you may hard-code an ACK timeout of 0.25 seconds and assume that we will test with max_delivery_delay&lt;=0.1.&nbsp; If you still have no ACK after 0.25 seconds, then repeat (resend the data and again wait for an ACK).</li>
+<li>In Streamer#close, you will have to implement some kind of connection teardown request (analogous to a TCP FIN request).&nbsp; This is necessary to confirm with the other host that both parties have received all the ACKs they might be waiting for.&nbsp; Roughly, these are the steps I would follow in Streamer#close:<br />
+<ol>
+<li>[Wait for any sent data packets to be ACKed.&nbsp; Actually, if you're doing stop-and-wait then you know all of your sent data has been ACKed.&nbsp; However, in Part 5 you'll add code to maybe wait here.]</li>
+<li>Send a FIN packet.</li>
+<li>Wait for an ACK of the FIN packet.&nbsp; Go back to Step 2 if a timer expires.</li>
+<li>Wait until the listener records that a FIN packet was received from the other side.</li>
+<li>Wait two seconds.</li>
+<li>Stop the listener thread with <tt>self.closed = True</tt> and <tt>self.socket.stoprecv()</tt></li>
+<li>Finally, return from Streamer#close</li>
+</ol>
+</li>
+<li>Notice that your listener thread must be updated to deal with the arrival of a FIN packet.</li>
+</ul>
+<p><em>Additional&nbsp; Explanation and Tips:</em></p>
+<ol>
+<li>ACKs may be lost, so we send a FIN packet when we are done sending data <strong>and</strong> we have received ACKs for all previously-sent data.</li>
+<li>The FIN message must be ACKed and either the FIN message or its ACK may be lost!&nbsp; The way TCP deals with this is for the socket to remain alive for a certain amount of time even after the final ACK has been sent.&nbsp; This allows the FIN message to be ACKed again if it is retransmitted.&nbsp; For this assignment I suggest you continue listening and responding for a two second "grace period" after sending your last ACK.</li>
+<li>It can be tricky to implement a connection teardown handshake (like TCP FIN) if you allow for the possibility of packet loss.&nbsp; There is a simulation parameter&nbsp;<em>become_reliable_after</em> which tells the simulator to stop dropping packets after a certain number of seconds.&nbsp; You might want to set this to a value like 10.0 when you start Stage C.&nbsp; This will allow you to focus first on getting the basic retransmissions working.&nbsp; After that's working then set <em>become_reliable_after</em> back to the default of a very large number and focus on getting the FIN handshake working.</li>
+<li>You may find it helpful to set max_delivery_delay=0 during your initial testing, but your final solution should work with <strong>both</strong> reordering and packet loss.</li>
+<li>When debugging your code, you may find it helpful to reduce the NUMS variable in test.py to the smallest possible value that still exhibits your bug.&nbsp; This will let you focus on just the first appearance of the bug.</li>
+<li>The default implementation of <a href="https://github.com/starzia/reliable-transport-sim/blob/master/lossy_socket.py#L8">lossy_socket.py</a> seeds the random number generator with a constant.&nbsp; This forces the exact same packets to be dropped every time you run the tests.&nbsp; After you've passed your tests, try removing this line and run the tests a few more times.&nbsp; This will simulate different patterns of packet losses.</li>
+</ol>
+<h2>Part 4: Corruption</h2>
+<h4>(15% of the grade)</h4>
+<p>Start by changing test.py to set corruption_rate=0.1.&nbsp; 10% of sent packets will have <strong>one or more</strong> bit flipped (zero to one or one to zero).</p>
+<p>Your task in Part 4 is to make Streamer tolerate these bit flips by adding a <strong>hash</strong> of the packet data to the segment header, and discarding any received segments which fail the hash test.&nbsp; (TCP and UDP use a checksum instead of a hash, but that only works for a single bit flip.)&nbsp; The code you implemented in Part 3 will cause the corrupted packet to be retransmitted.</p>
+<p>After Part 4, your tests should pass even when the tester is simultaneously allowing packet loss, and corruption.&nbsp; However, performance will be slow because of the "stop and wait" design.</p>
+<p>Tips:</p>
+<ul>
+<li>When I say "compute a hash of the packet data" I don't mean calling hash(my_message).&nbsp; This will call the __hash__ method of the my_message object which is not guaranteed to be deterministic; it will not necessarily give the same answer on both the sender and receiver.&nbsp; Instead use a standard (deterministic) hash function like md5.&nbsp; You can use the hashlib library as shown in the first code example on this page: <a style="font-family: inherit; font-size: 1rem;" href="https://docs.python.org/2/library/hashlib.html">https://docs.python.org/2/library/hashlib.html</a><span style="font-family: inherit; font-size: 1rem;">&nbsp;</span></li>
+</ul>
+<h2>Part 5: Pipelined ACKs</h2>
+<h4>(15% of the grade)</h4>
+<p>Now we will allow multiple packets to be "in flight" at once ("pipelining"), which greatly increases throughput.&nbsp; You may choose either the "Go Back N" or "Selective Repeat" style.&nbsp; Set max_delivery_delay=0.1 to allow for in-flight packets to be <strong>reordered</strong> before delivery.</p>
+<p>Tips:</p>
+<ol>
+<li>Your implementation of Streamer#close should wait for any in-flight packets to be ACKed before sending a FIN packet.</li>
+<li>If you are using Selective Repeat, you may want to use Python's <a href="https://docs.python.org/2/library/threading.html#timer-objects">threading.Timer</a> to handle the scheduling of future retransmission checks.&nbsp; <em>Timer</em> lets you run a function (or a lambda) after a timeout.&nbsp; The function will be run in another thread.</li>
+<li>However, if you create too many Timers (and thus threads) you'll get weird runtime errors.&nbsp; To avoid this, I suggest you use just one timer in your implementation.&nbsp; In other words, do something like go-back-N or TCP instead of selective repeat.</li>
+<li>Don't worry about <strong>window</strong> size; let the window be infinite.&nbsp; There is a <a href="https://github.com/starzia/reliable-transport-sim/blob/master/lossy_socket.py#L59">10ms pause</a> built into my implementation of LossyUDP#sendto.&nbsp; One of the reasons I did this was to simplify the problem and prevent you from worrying about either the receiver or the network from being overwhelmed by too many packets.&nbsp; This delay limits the total connection throughput to just 147kbyte/s (100 UDP packets per second * 1472 bytes/packet).</li>
+<li>The concurrency introduced by both the background listener and the multiple timers have the potential to introduce some tricky race condition bugs.&nbsp; This topic is covered in an OS class.&nbsp; The Python <a href="https://docs.python.org/3/library/threading.html#lock-objects">threading.Lock</a> objects provides a way to prevent two threads from accessing the same shared data simultaneously.&nbsp; For example, the code below uses a lock to ensure that get_sum always returns zero.&nbsp; Only one thread may be running code inside the "<tt>with self.lock</tt>" (only one thread may "hold the lock").&nbsp; Without the lock, it might be possible for get_sum to return "1" because it accessed <strong>a</strong> and <strong>b</strong> in the middle of the update function's work.</li>
+</ol>
+<pre style="padding-left: 40px;"><span class="pl-k">__init__(self):<br />    self.lock = Lock()<br />    self.a = 0<br />    self.b = 0<br /><br /></span>def update(self):<br />    with self.lock:<br />        self.a += 1<br />        self.b -= 1<br /><br />def get_sum(self):<br />    with self.lock:<br />        return self.a + self.b</pre>
+<p><span>In the end, your tests should pass even when the tester is simultaneously allowing packet loss, corruption, and reorderings.&nbsp; Your solution should be much faster than the code you wrote for Part 4, so try setting the NUMS variable in test.py to a much larger value than you used in Part 3 and ensure that your code still works.</span></p>
+<h2>Extra Credit: More Performance Optimizations</h2>
+<h4>(an extra 10% of the grade can be earned)</h4>
+<p>In the extra credit you should implement <strong>piggy-backed ACKs</strong>, <a href="https://en.wikipedia.org/wiki/TCP_delayed_acknowledgment"><strong>delayed ACKs</strong></a> and <a href="https://en.wikipedia.org/wiki/Nagle%27s_algorithm"><strong>Nagle's Algorithm</strong></a> to minimize the total number of bytes transmitted during testing.&nbsp;</p>
+<p>Notice that LossyUDP tracks the total number of packets and bytes sent and received.&nbsp; At the end of execution it prints the values like the following example:</p>
+<pre class="p1"><span class="s1">PACKETS_SENT=1</span><br /><span class="s1">UDP_BYTES_SENT=3890</span><br /><span class="s1">ETH_BYTES_SENT=3936</span><br /><span class="s1">PACKETS_RECV=1000</span><br /><span class="s1">UDP_BYTES_RECV=3890</span><br /><span class="s1">ETH_BYTES_RECV=49890<br /></span></pre>
+<p class="p1">Every UDP packet has:</p>
+<ul>
+<li class="p1">18 bytes for the Ethernet header</li>
+<li class="p1">20 bytes for the IPv4 header</li>
+<li class="p1">8 bytes for the UDP header</li>
+</ul>
+<p>We'll discuss IP and Ethernet later in the quarter, but you have probably noticed these headers when using Wireshark.&nbsp; <span class="s1">ETH_BYTES_SENT and ETH_BYTES_RECV includes this overhead in the calculation.&nbsp; Sending lots of little UDP packets is really inefficient!&nbsp; Your goal in the extra credit is to minimize ETH_BYTES_SENT and ETH_BYTES_RECV.</span></p>
+<p><span class="s1">There is a tradeoff between latency and efficiency in some protocol design decisions.&nbsp; In implementing the extra credit, the total time needed to complete the tests may increase <strong>slightly</strong>, but that is OK.</span></p>
+<p><span class="s1">Notice also that the extra credit gives you an incentive to make your reliable transport header as small as possible.&nbsp; In particular, you don't want to waste space with large sequence numbers.&nbsp; If you choose a small maximum sequence number (that loops around to zero) then you will have to limit your window size to prevent old packets from being confused for new ones.</span></p>
+<h2>Submission</h2>
+<ul>
+<li>You should work in pairs.&nbsp; List the participants (names and netids) in a README.txt file.</li>
+<li>Please make just one submission for the pair.&nbsp; The parts build on each other, so submit the solution for the last part that you are able to complete.</li>
+<li>Your code must compile and run on moore.wot.eecs.northwestern.edu.</li>
+<li>You should include all python source file, most importantly "streamer.py".</li>
+<li>You may <strong>not</strong> make any modifications to lossy_socket.py.</li>
+<li>You may not use any outside libraries to in your code (do not "pip install" anything).</li>
+<li>Your submission should be a .tgz file (a gzipped tarball), including a README.txt, and the python sources.&nbsp; To create the archive, use a command like the following
+<ul>
+<li>tar -czvf project2_NETID1_NETID2.tgz README.txt *.py</li>
+<li>Notice that I'm including both partners' netids in the filename.&nbsp;</li>
+</ul>
+</li>
+<li>Remember that you should leave a comment explaining any bits of code that you copied from the Internet (just in case two groups copy the same code from the Internet, we won't think that you copied each other directly).</li>
+<li>After you make your tarball, copy it to a temporary folder, extract it, <strong>copy over the original test.py and lossy_socket.py</strong>, and test it again to make sure you included everything.</li>
+</ul>
+<h3>Sharing files with your partner using git</h3>
+<p>I recommend that you create a git repository for your code and use <a href="https://bitbucket.org/">Bitbucket</a> to share the repository with your partner.&nbsp; Each of you will be able to work on your own copy of the code, and periodically push updates to the central repository.&nbsp; I recommend Bitbucket instead of Github because private repositories are free on Bitbucket (and it would be a violation of our cheating policy to post your code on a public repository).</p>
