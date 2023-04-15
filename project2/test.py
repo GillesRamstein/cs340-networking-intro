@@ -6,64 +6,79 @@ from streamer import Streamer
 NUMS=1000
 
 
-def receive(s):
+def receive(s, n):
     expected = 0
     str_buf = ""
-    while expected < NUMS:
+    while expected < n:
         data = s.recv()
         if not data:
             continue
 
-        print("recv returned {%s}" % data.decode('utf-8'))
+        print("TEST: recv returned {%s}" % data.decode('utf-8'))
         str_buf += data.decode('utf-8')
-        for t in str_buf.split(" "):
-            if len(t) == 0:
+        for token in str_buf.split(" "):
+            if len(token) == 0:
                 # there could be a "" at the start or the end, if a space is there
                 continue
-            if int(t) == expected:
-                print("got %d!" % expected)
+            if int(token) == expected:
+                print("TEST: got %d!" % expected)
                 expected += 1
                 str_buf = ''
-            elif int(t) > expected:
-                print("ERROR: got %s but was expecting %d" %(t, expected))
+            elif int(token) > expected:
+                print("TEST: ERROR: got %s but was expecting %d" %(token, expected))
                 sys.exit(-1)
             else:
                 # we only received the first part of the number at the end
                 # we must leave it in the buffer and read more.
-                str_buf = t
+                str_buf = token
                 break
+        print("")
 
-    
+ 
 def host1(listen_port, remote_port):
     s = Streamer(dst_ip="localhost", dst_port=remote_port,
                  src_ip="localhost", src_port=listen_port)
-    receive(s)
-    print("STAGE 1 TEST PASSED!")
+
+    # TEST1
+    receive(s, NUMS//10)
+    print("\nSTAGE 1 TEST PASSED!\n")
+
+    # TEST2
     # send large chunks of data
     i = 0
     buf = ""
     while i < NUMS:
         buf += ("%d " % i)
         if len(buf) > 12345 or i == NUMS-1:
-            print("sending {%s}" % buf)
+            print("TEST: sending {%s}" % buf)
             s.send(buf.encode('utf-8'))
             buf = ""
+            print("")
         i += 1
-    s.close()
-    print("CHECK THE OTHER SCRIPT FOR STAGE 2 RESULTS.")
 
-        
+    s.close()
+    print("\nFINISHED SENDING FOR TEST2\n")
+
+ 
 def host2(listen_port, remote_port):
     s = Streamer(dst_ip="localhost", dst_port=remote_port,
                  src_ip="localhost", src_port=listen_port)
+
+    # TEST1
     # send small pieces of data
-    for i in range(NUMS):
+    for i in range(NUMS//10):
         buf = ("%d " % i)
-        print("sending {%s}" % buf)
+        print("TEST: sending {%s}" % buf)
         s.send(buf.encode('utf-8'))
-    receive(s)
+        print("")
+
+    print("\nFINISHED SENDING FOR TEST1\n")
+
+    # TEST2
+    receive(s, NUMS)
+
     s.close()
-    print("STAGE 2 TEST PASSED!")
+    print("\nSTAGE 2 TEST PASSED!\n")
 
 
 def main():
