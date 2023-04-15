@@ -11,6 +11,9 @@ def receive(s):
     str_buf = ""
     while expected < NUMS:
         data = s.recv()
+        if not data:
+            continue
+
         print("recv returned {%s}" % data.decode('utf-8'))
         str_buf += data.decode('utf-8')
         for t in str_buf.split(" "):
