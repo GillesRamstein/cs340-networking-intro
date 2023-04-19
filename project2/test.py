@@ -36,7 +36,7 @@ def receive(s, n):
 
  
 def host1(listen_port, remote_port):
-    s = Streamer(dst_ip="localhost", dst_port=remote_port,
+    s = Streamer("A", dst_ip="localhost", dst_port=remote_port,
                  src_ip="localhost", src_port=listen_port)
 
     # TEST1
@@ -55,13 +55,13 @@ def host1(listen_port, remote_port):
             buf = ""
             print("")
         i += 1
+    print("\nFINISHED SENDING FOR TEST2\n")
 
     s.close()
-    print("\nFINISHED SENDING FOR TEST2\n")
 
  
 def host2(listen_port, remote_port):
-    s = Streamer(dst_ip="localhost", dst_port=remote_port,
+    s = Streamer("B", dst_ip="localhost", dst_port=remote_port,
                  src_ip="localhost", src_port=listen_port)
 
     # TEST1
@@ -71,19 +71,18 @@ def host2(listen_port, remote_port):
         print("TEST: sending {%s}" % buf)
         s.send(buf.encode('utf-8'))
         print("")
-
     print("\nFINISHED SENDING FOR TEST1\n")
 
     # TEST2
     receive(s, NUMS)
+    print("\nSTAGE 2 TEST PASSED!\n")
 
     s.close()
-    print("\nSTAGE 2 TEST PASSED!\n")
 
 
 def main():
     lossy_socket.sim = lossy_socket.SimulationParams(
-        loss_rate=0.0,
+        loss_rate=0.1,
         corruption_rate=0.0,
         max_delivery_delay=0.1,
         become_reliable_after=100000.0,
