@@ -1,6 +1,7 @@
 # do not import anything else from loss_socket besides LossyUDP
 # do not import anything else from socket except INADDR_ANY
 from concurrent.futures import ThreadPoolExecutor
+from hashlib import md5
 from socket import INADDR_ANY
 from struct import pack, unpack
 from time import sleep, time
@@ -9,10 +10,12 @@ from typing import Iterator
 from lossy_socket import MAX_MSG_LENGTH, LossyUDP
 
 # Headers:
+#        md5: 16 bytes
 # segment_id:  4 bytes
 #     is_ack:  1 byte
-#     is_fin:..1 byte
-HEADER_LENGTH = 6
+#     is_fin:  1 byte
+HASH_LENGTH = 16
+HEADER_LENGTH = HASH_LENGTH + 4 + 1 + 1
 BODY_LENGTH = MAX_MSG_LENGTH - HEADER_LENGTH
 
 
@@ -44,7 +47,6 @@ class Streamer:
         self.receive_buffer = dict()
         self.ack_received = False
         self.fin_received = False
-        self.last_sent_msg = b""
 
         self.closed = False
         executor = ThreadPoolExecutor(max_workers=1)
@@ -57,20 +59,28 @@ class Streamer:
         print(f"{self.name}: Start listening\n")
         while not self.closed:
             try:
-                data, _ = self.sock.recvfrom()
-                if data == b"":
-                    print(f"{self.name}: discarding a message with an invalid header")
+                packet, _ = self.sock.recvfrom()
+                # if packet == b"":
+                #     print(f"{self.name}: discarding a message with an invalid header")
+                #     continue
+
+                # check data integrity
+                if md5(packet[HASH_LENGTH:]).digest() != packet[:HASH_LENGTH]:
+                    print(f"{self.name}: discarding corrupted packet")
                     continue
 
-                header = unpack(">I??", data[:HEADER_LENGTH])
+                # unpack header
+                header = unpack(">I??", packet[HASH_LENGTH:HEADER_LENGTH])
                 segment_id, is_ack, is_fin = header
-                body = data[HEADER_LENGTH:]
+
+                # unpack body
+                body = packet[HEADER_LENGTH:]
 
                 if is_ack:
                     print(
                         f"{self.name}: [ACK Rcvd] "
                         f"SegId:{segment_id} "
-                        f"Bytes:{len(data)} "
+                        f"Bytes:{len(packet)} "
                         f"Body:'{body.decode()}'"
                     )
                     self.ack_received = True
@@ -80,7 +90,7 @@ class Streamer:
                     print(
                         f"{self.name}: [FIN Rcvd] "
                         f"SegId:{segment_id} "
-                        f"Bytes:{len(data)} "
+                        f"Bytes:{len(packet)} "
                         f"Body:'{body.decode()}'"
                     )
                     self.fin_received = True
@@ -99,7 +109,7 @@ class Streamer:
                         print(
                             f"{self.name}: [MSG Rcvd] "
                             f"SegId:{segment_id} "
-                            f"Bytes:{len(data)} "
+                            f"Bytes:{len(packet)} "
                             f"Body:'{body.decode()}'"
                         )
                         self.receive_buffer[segment_id] = body
@@ -120,16 +130,23 @@ class Streamer:
         # split message to fit into max packet size
         for data_chunk in split_bytes(data_bytes, BODY_LENGTH):
 
-            # send message
+            # create header
             header = pack(">I??", self.send_segment_id, is_ack, is_fin)
-            message = header + data_chunk
-            self.sock.sendto(message, (self.dst_ip, self.dst_port))
+
+            # assemble packet
+            packet = header + data_chunk
+
+            # prepend hash
+            packet = md5(packet).digest() + packet
+
+            # send packet
+            self.sock.sendto(packet, (self.dst_ip, self.dst_port))
 
             if is_ack:
                 print(
                     f"{self.name}: [ACK Sent] "
                     f"SegId:{self.send_segment_id} "
-                    f"Bytes:{len(message)} "
+                    f"Bytes:{len(packet)} "
                     f"Body:'{data_chunk.decode()}'"
                 )
                 return
@@ -138,7 +155,7 @@ class Streamer:
                 print(
                     f"{self.name}: [FIN Sent] "
                     f"SegId:{self.send_segment_id} "
-                    f"Bytes:{len(message)} "
+                    f"Bytes:{len(packet)} "
                     f"Body:'{data_chunk.decode()}'"
                 )
 
@@ -146,7 +163,7 @@ class Streamer:
                 print(
                     f"{self.name}: [MSG Sent] "
                     f"SegId:{self.send_segment_id} "
-                    f"Bytes:{len(message)} "
+                    f"Bytes:{len(packet)} "
                     f"Body:'{data_chunk.decode()}'"
                 )
                 # increment send segment id
@@ -154,19 +171,20 @@ class Streamer:
 
             # wait/block until message is ACKd
             ACK_TIMEOUT = 0.5  # seconds
-            start = time()
             self.ack_received = False
+            start = time()
             while not self.ack_received:
                 print(f"{self.name}: waiting for ACK", end="\r")
                 sleep(0.1)
+
+                # resend message
                 if time() - start >= ACK_TIMEOUT:
-                    # resend message
                     print(
                         f"{self.name}: ACK Timout: resending",
-                        unpack(">I??", message[:HEADER_LENGTH]),
-                        message[HEADER_LENGTH:].decode(),
+                        unpack(">I??", packet[HASH_LENGTH:HEADER_LENGTH]),
+                        packet[HEADER_LENGTH:].decode(),
                     )
-                    self.sock.sendto(message, (self.dst_ip, self.dst_port))
+                    self.sock.sendto(packet, (self.dst_ip, self.dst_port))
                     start = time()
 
 
