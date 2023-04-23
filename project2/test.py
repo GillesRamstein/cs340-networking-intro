@@ -14,14 +14,20 @@ def receive(s, n):
         if not data:
             continue
 
-        print("TEST: recv returned {%s}" % data.decode('utf-8'))
+
         str_buf += data.decode('utf-8')
-        for token in str_buf.split(" "):
+        tokens = str_buf.split(" ")
+        _str_buf = f"{' '.join(tokens[:2])} ... {' '.join(tokens[-3:])}" if len(tokens) > 4 else str_buf
+        print(f"TEST: recv returned {_str_buf}")
+        for i, token in enumerate(tokens):
             if len(token) == 0:
                 # there could be a "" at the start or the end, if a space is there
                 continue
             if int(token) == expected:
-                print("TEST: got %d!" % expected)
+                if i < 2 or len(tokens) - i < 4:
+                    print("TEST: got %d!" % expected)
+                if i == 2 and len(tokens) < 4:
+                    print("  ...")
                 expected += 1
                 str_buf = ''
             elif int(token) > expected:
@@ -50,7 +56,7 @@ def host1(listen_port, remote_port):
     while i < NUMS:
         buf += ("%d " % i)
         if len(buf) > 12345 or i == NUMS-1:
-            print("TEST: sending {%s}" % buf)
+            print(f"TEST: sending {buf[:3]} ... {buf[-3:]}")
             s.send(buf.encode('utf-8'))
             buf = ""
             print("")

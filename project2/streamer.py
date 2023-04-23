@@ -1,22 +1,28 @@
 # do not import anything else from loss_socket besides LossyUDP
 # do not import anything else from socket except INADDR_ANY
+from bisect import insort_left
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from hashlib import md5
 from socket import INADDR_ANY
 from struct import pack, unpack
 from time import sleep, time
+from threading import Lock
 from typing import Iterator
 
 from lossy_socket import MAX_MSG_LENGTH, LossyUDP
 
-# Headers:
-#        md5: 16 bytes
-# segment_id:  4 bytes
-#     is_ack:  1 byte
-#     is_fin:  1 byte
-HASH_LENGTH = 16
-HEADER_LENGTH = HASH_LENGTH + 4 + 1 + 1
+HASH_LENGTH = 16  # bytes
+SEGMENT_ID_LENGTH = 4  # bytes
+IS_ACK_LENGTH = 1  # bytes
+IS_FIN_LENGTH = 1  # bytes
+
+HEADER_LENGTH = HASH_LENGTH + SEGMENT_ID_LENGTH + IS_ACK_LENGTH + IS_FIN_LENGTH
 BODY_LENGTH = MAX_MSG_LENGTH - HEADER_LENGTH
+
+ACK_TIMEOUT = 0.5  # seconds
+
+RECV_WINDOW_SIZE = 10
 
 
 def split_bytes(data_bytes: bytes, chunk_size: int) -> Iterator[bytes]:
@@ -37,15 +43,18 @@ class Streamer:
         Default values listen on all network interfaces, chooses a random
         source port, and does not introduce any simulated packet loss
         """
+        self.lock = Lock()
         self.name = name
         self.sock = LossyUDP()
         self.sock.bind((src_ip, src_port))
         self.dst_ip = dst_ip
         self.dst_port = dst_port
         self.send_segment_id = 0
+        self.send_buffer = dict()
         self.recv_segment_id = -1
-        self.receive_buffer = dict()
-        self.ack_received = False
+        self.recv_buffer = dict()
+        self.ack_segment_id = -1
+        self.ack_buffer = deque()
         self.fin_received = False
 
         self.closed = False
@@ -58,11 +67,9 @@ class Streamer:
         """
         print(f"{self.name}: Start listening\n")
         while not self.closed:
+            print(f"{self.name}: listening")
             try:
                 packet, _ = self.sock.recvfrom()
-                # if packet == b"":
-                #     print(f"{self.name}: discarding a message with an invalid header")
-                #     continue
 
                 # check data integrity
                 if md5(packet[HASH_LENGTH:]).digest() != packet[:HASH_LENGTH]:
@@ -83,8 +90,36 @@ class Streamer:
                         f"Bytes:{len(packet)} "
                         f"Body:'{body.decode()}'"
                     )
-                    self.ack_received = True
-                    # discard ACK message - dont put into receive_buffer
+                    # extract ack_seg_id from body
+                    try:
+                        ack_seg_id = int(body.decode("utf-8")[4:])
+                    except ValueError:
+                        if body.decode("utf-8") == "ACK-FIN":
+                            print(f"{self.name}: FIN got ACKd!")
+                            continue
+                        else:
+                            assert False, "Unreachable"
+
+                    # ACK arrived in expected order
+                    if self.ack_segment_id + 1 == ack_seg_id:
+                        with self.lock:
+                            self.ack_segment_id = ack_seg_id
+                            # purge from send_buffer
+                            self.send_buffer.pop(ack_seg_id)
+                            # check if ACKs from buffer push frontier forward
+                            while self.ack_buffer and self.ack_segment_id + 1 == self.ack_buffer[0]:
+                                self.ack_segment_id = self.ack_buffer.popleft()
+                                self.send_buffer.pop(self.ack_segment_id)
+
+                    # ACK arrived out of order
+                    else:
+                        # TODO: this should never happen ?!
+                        if ack_seg_id <= self.ack_segment_id:
+                            print(f"{self.name}: Received ACK for retransmission {ack_seg_id}")
+                        elif ack_seg_id > self.ack_segment_id + 1:
+                            insort_left(self.ack_buffer, ack_seg_id)
+                        else:
+                            assert False, "Unreachable"
 
                 elif is_fin:
                     print(
@@ -102,19 +137,29 @@ class Streamer:
                 else:
                     if segment_id <= self.recv_segment_id:
                         # received a retransmission -> resend ACK
-                        ack_body = f"{self.name}-ack-{self.recv_segment_id}"
+                        print(f"{self.name}: Resending ACK for received retransmission {segment_id}")
+                        ack_body = f"ACK-{segment_id}"
                         self.send(ack_body.encode("utf-8"), is_ack=True)
                     else:
-                        # received a new message -> add to receive_buffer
-                        print(
-                            f"{self.name}: [MSG Rcvd] "
-                            f"SegId:{segment_id} "
-                            f"Bytes:{len(packet)} "
-                            f"Body:'{body.decode()}'"
-                        )
-                        self.receive_buffer[segment_id] = body
+                        with self.lock:
+                            # received a new message -> add to receive_buffer
+                            _body = body.decode()
+                            _body = _body if len(_body) < 50 else f"{_body[:15]}...{_body[-15:]}"
+                            print(
+                                f"{self.name}: [MSG Rcvd] "
+                                f"SegId:{segment_id} "
+                                f"Bytes:{len(packet)} "
+                                f"Body:'{_body}'"
+                            )
+                            self.recv_buffer[segment_id] = body
+                            # send ACK for accepted message
+                            ack_body = f"ACK-{segment_id}"
+                            self.send(ack_body.encode("utf-8"), is_ack=True)
 
-                print(f"{self.name}: recv-buff", self.receive_buffer)
+
+                print(f"{self.name}: SND: {self.send_segment_id} {list(self.send_buffer.keys())}")
+                print(f"{self.name}: ACK: {self.ack_segment_id} {list(self.ack_buffer)}")
+                print(f"{self.name}: RCV: {self.recv_segment_id} {list(self.recv_buffer.keys())}")
 
             except Exception as e:
                 print(f"{self.name}: listener died!\n", e)
@@ -160,81 +205,83 @@ class Streamer:
                 )
 
             else:
+                _body = data_chunk.decode()
+                _body = _body if len(_body) < 50 else f"{_body[:15]}...{_body[-15:]}"
                 print(
                     f"{self.name}: [MSG Sent] "
                     f"SegId:{self.send_segment_id} "
                     f"Bytes:{len(packet)} "
-                    f"Body:'{data_chunk.decode()}'"
+                    f"Body:'{_body}'"
                 )
+
+            # store message and ack_timer in send_buffer for possible retransmissions
+            with self.lock:
+                self.send_buffer[self.send_segment_id] = (packet, time())
+
+            # Wait if max num messages are in flight
+            while self.send_segment_id >= self.ack_segment_id + RECV_WINDOW_SIZE:
+                print(f"{self.name}: waiting for ACK", self.ack_segment_id + 1, end="\r")
+                sleep(0.1)
+
+                with self.lock:
+                    if (self.ack_segment_id + 1) not in self.send_buffer:
+                        break
+
+                    # check if oldest message got ACK before timeout, else resend message
+                    if time() - self.send_buffer[self.ack_segment_id + 1][1] >= ACK_TIMEOUT:
+                        lost_packet = self.send_buffer[self.ack_segment_id + 1][0]
+                        print(
+                            f"{self.name}: ACK Timout: resending: ",
+                            unpack(">I??", lost_packet[HASH_LENGTH:HEADER_LENGTH])[0],
+                        )
+                        self.sock.sendto(lost_packet, (self.dst_ip, self.dst_port))
+                        # reset ack_timer
+                        self.send_buffer[self.ack_segment_id + 1] = (lost_packet, time())
+
+            if not is_ack and not is_fin:
                 # increment send segment id
                 self.send_segment_id += 1
 
-            # wait/block until message is ACKd
-            ACK_TIMEOUT = 0.5  # seconds
-            self.ack_received = False
-            start = time()
-            while not self.ack_received:
-                print(f"{self.name}: waiting for ACK", end="\r")
-                sleep(0.1)
-
-                # resend message
-                if time() - start >= ACK_TIMEOUT:
-                    print(
-                        f"{self.name}: ACK Timout: resending",
-                        unpack(">I??", packet[HASH_LENGTH:HEADER_LENGTH]),
-                        packet[HEADER_LENGTH:].decode(),
-                    )
-                    self.sock.sendto(packet, (self.dst_ip, self.dst_port))
-                    start = time()
-
 
     def recv(self) -> bytes:
-        """
-        Blocks (waits) if no data is ready to be read from the connection
-        """
-        # return empty bytes if receive_buffer is empty
-        if not self.receive_buffer:
+        """Return contiguous data from receive_buffer"""
+        if not self.recv_buffer:
             return b""
 
-        recvd = []
-        # find contiguous messages from next expected segment_id to
-        # highest segment_id in recv_buffer
-        for i in range(self.recv_segment_id + 1, max(self.receive_buffer) + 1):
+        with self.lock:
+            contiguous_data = b""
+            while self.recv_segment_id + 1 in self.recv_buffer:
+                self.recv_segment_id += 1
+                contiguous_data += self.recv_buffer.pop(self.recv_segment_id)
+            return contiguous_data
 
-            # skip if segment_id is not in receive_buffer
-            if i not in self.receive_buffer:
-                continue
-
-            # stop if i is not expected next segment_id
-            if i != self.recv_segment_id + 1:
-                break
-
-            # message is next expected: prepare to return
-            self.recv_segment_id = i
-            recvd.append(self.receive_buffer.pop(i))
-
-            # send ACK for accepted message
-            ack_body = f"ACK-{self.recv_segment_id}"
-            self.send(ack_body.encode("utf-8"), is_ack=True)
-
-        # return empty or accepted bytes
-        if recvd:
-            return b" ".join(recvd)
-        else:
-            return b""
 
     def close(self) -> None:
-        """
-        Cleans up.
+        """Cleans up.
         It should block (wait) until the Streamer is done with all
         the necessary ACKs and retransmissions
         """
         print(f"{self.name}: init connection teardown")
 
-        # wait for last message ACK
-        while not self.ack_received:
-            sleep(0.01)
-            print(f"{self.name}: waiting for ACK before FIN", end="\r")
+        # Wait till all sent messages are ACKd
+        while self.send_buffer:
+            print(f"{self.name}: waiting for ACK", self.ack_segment_id + 1, end="\r")
+            sleep(0.1)
+
+            with self.lock:
+                if (self.ack_segment_id + 1) not in self.send_buffer:
+                    break
+
+                # check if oldest message got ACK before timeout, else resend message
+                if time() - self.send_buffer[self.ack_segment_id + 1][1] >= ACK_TIMEOUT:
+                    lost_packet = self.send_buffer[self.ack_segment_id + 1][0]
+                    print(
+                        f"{self.name}: ACK Timout: resending ",
+                        unpack(">I??", lost_packet[HASH_LENGTH:HEADER_LENGTH])[0],
+                    )
+                    self.sock.sendto(lost_packet, (self.dst_ip, self.dst_port))
+                    # reset ack_timer
+                    self.send_buffer[self.ack_segment_id + 1] = (lost_packet, time())
 
         # send FIN (needs to be ACKd)
         fin_body = "FIN"
@@ -242,7 +289,7 @@ class Streamer:
 
         # wait for other end FIN
         while not self.fin_received:
-            sleep(0.01)
+            sleep(0.1)
             print(f"{self.name}: waiting for FIN", end="\r")
 
         # close connection after grace period
