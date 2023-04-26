@@ -1,9 +1,12 @@
 import sys
 
 import lossy_socket
+from lossy_socket import _print
 from streamer import Streamer
 
-NUMS=1000
+
+NUMS_1 = 125
+NUMS_2 = 1000
 
 
 def receive(s, n):
@@ -18,27 +21,26 @@ def receive(s, n):
         str_buf += data.decode('utf-8')
         tokens = str_buf.split(" ")
         _str_buf = f"{' '.join(tokens[:2])} ... {' '.join(tokens[-3:])}" if len(tokens) > 4 else str_buf
-        print(f"TEST: recv returned {_str_buf}")
+        _print(f"TEST: recv returned {_str_buf}")
         for i, token in enumerate(tokens):
             if len(token) == 0:
                 # there could be a "" at the start or the end, if a space is there
                 continue
             if int(token) == expected:
                 if i < 2 or len(tokens) - i < 4:
-                    print("TEST: got %d!" % expected)
-                if i == 2 and len(tokens) < 4:
+                    _print("TEST: got %d!" % expected)
+                if i == 2 and len(tokens) > 4:
                     print("  ...")
                 expected += 1
                 str_buf = ''
             elif int(token) > expected:
-                print("TEST: ERROR: got %s but was expecting %d" %(token, expected))
+                _print("TEST: ERROR: got %s but was expecting %d" %(token, expected))
                 sys.exit(-1)
             else:
                 # we only received the first part of the number at the end
                 # we must leave it in the buffer and read more.
                 str_buf = token
                 break
-        print("")
 
  
 def host1(listen_port, remote_port):
@@ -46,22 +48,22 @@ def host1(listen_port, remote_port):
                  src_ip="localhost", src_port=listen_port)
 
     # TEST1
-    receive(s, NUMS//10)
-    print("\nSTAGE 1 TEST PASSED!\n")
+    receive(s, NUMS_1)
+    _print("TEST: STAGE 1 TEST PASSED!")
 
     # TEST2
     # send large chunks of data
     i = 0
     buf = ""
-    while i < NUMS:
+    while i < NUMS_2:
         buf += ("%d " % i)
-        if len(buf) > 12345 or i == NUMS-1:
-            print(f"TEST: sending {buf[:3]} ... {buf[-3:]}")
+        if len(buf) > 12345 or i == NUMS_2-1:
+            print(f"TEST: sending {buf[:15]}...{buf[-15:]}")
             s.send(buf.encode('utf-8'))
             buf = ""
             print("")
         i += 1
-    print("\nFINISHED SENDING FOR TEST2\n")
+    _print("TEST: FINISHED SENDING FOR TEST2")
 
     s.close()
 
@@ -72,16 +74,15 @@ def host2(listen_port, remote_port):
 
     # TEST1
     # send small pieces of data
-    for i in range(NUMS//10):
+    for i in range(NUMS_1):
         buf = ("%d " % i)
-        print("TEST: sending {%s}" % buf)
+        _print("TEST: sending {%s}" % buf)
         s.send(buf.encode('utf-8'))
-        print("")
-    print("\nFINISHED SENDING FOR TEST1\n")
+    _print("TEST: FINISHED SENDING FOR TEST1")
 
     # TEST2
-    receive(s, NUMS)
-    print("\nSTAGE 2 TEST PASSED!\n")
+    receive(s, NUMS_2)
+    _print("TEST: STAGE 2 TEST PASSED!")
 
     s.close()
 

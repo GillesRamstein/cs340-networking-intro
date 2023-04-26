@@ -1,16 +1,14 @@
-# do not import anything else from loss_socket besides LossyUDP
-# do not import anything else from socket except INADDR_ANY
 from bisect import insort_left
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from hashlib import md5
 from socket import INADDR_ANY
 from struct import pack, unpack
-from time import sleep, time
 from threading import Lock
+from time import sleep, time
 from typing import Iterator
 
-from lossy_socket import MAX_MSG_LENGTH, LossyUDP
+from lossy_socket import MAX_MSG_LENGTH, LossyUDP, _print
 
 HASH_LENGTH = 16  # bytes
 SEGMENT_ID_LENGTH = 4  # bytes
@@ -20,14 +18,10 @@ IS_FIN_LENGTH = 1  # bytes
 HEADER_LENGTH = HASH_LENGTH + SEGMENT_ID_LENGTH + IS_ACK_LENGTH + IS_FIN_LENGTH
 BODY_LENGTH = MAX_MSG_LENGTH - HEADER_LENGTH
 
-ACK_TIMEOUT = 0.5  # seconds
+ACK_TIMEOUT = 0.75  # seconds
 
-RECV_WINDOW_SIZE = 10
-
-
-def split_bytes(data_bytes: bytes, chunk_size: int) -> Iterator[bytes]:
-    for i in range(0, len(data_bytes), chunk_size):
-        yield data_bytes[i : i + chunk_size]
+SEND_BUFF_SIZE = 1000
+RECV_BUFF_SIZE = 1000
 
 
 class Streamer:
@@ -43,257 +37,353 @@ class Streamer:
         Default values listen on all network interfaces, chooses a random
         source port, and does not introduce any simulated packet loss
         """
-        self.lock = Lock()
         self.name = name
+
         self.sock = LossyUDP()
         self.sock.bind((src_ip, src_port))
         self.dst_ip = dst_ip
         self.dst_port = dst_port
+
         self.send_segment_id = 0
-        self.send_buffer = dict()
+        self.send_buffer = deque()
+        self.send_lock = Lock()
+
         self.recv_segment_id = -1
-        self.recv_buffer = dict()
+        self.recv_buffer = deque()
+        self.recv_lock = Lock()
+
         self.ack_segment_id = -1
         self.ack_buffer = deque()
+        self.ack_lock = Lock()
+
         self.fin_received = False
 
         self.closed = False
-        executor = ThreadPoolExecutor(max_workers=1)
-        executor.submit(self.listener)
 
-    def listener(self):
+        listener_thread = ThreadPoolExecutor(max_workers=1)
+        listener_thread.submit(self._listener)
+        sender_thread = ThreadPoolExecutor(max_workers=1)
+        sender_thread.submit(self._sender)
+
+    def send(
+        self, data_bytes: bytes, ack_flag: bool = False, fin_flag: bool = False
+    ) -> None:
         """
-        Receive data and feed receive_buffer in a background thread
+        Take input data_bytes, split into chunks if data_bytes does not fit into maximum
+        packet size, create packets and put them into the send buffer.
         """
-        print(f"{self.name}: Start listening\n")
+        for data_chunk in split_bytes(data_bytes, BODY_LENGTH):
+            while len(self.send_buffer) + 1 >= SEND_BUFF_SIZE:
+                # _print(f"{self.name}: SNDBUF Full", end="\r")
+                sleep(0.01)
+
+            with self.send_lock:
+                segment_id = self.send_segment_id
+                packet = build_packet(data_chunk, segment_id, ack_flag, fin_flag)
+                insort_left(self.send_buffer, (0.0, segment_id, packet))
+                self.send_segment_id += 1
+                # _print(
+                #     f"{self.name}: SNDBUF PUT({segment_id}) "
+                #     f"-> {[p[:-1] for p in self.send_buffer]}",
+                # )
+
+            sleep(0.005)
+
+    def _send_ack(self, data: bytes, segment_id: int):
+        """
+        Send an ACK message.
+        """
+        packet = build_packet(data, segment_id, ack_flag=True, fin_flag=False)
+        self.sock.sendto(packet, (self.dst_ip, self.dst_port))
+        _print(
+            f"{self.name}: [ACK Sent] "
+            f"SegId:{segment_id} "
+            f"Bytes:{len(packet)} "
+            f"Body:'{packet[HEADER_LENGTH:].decode()}'"
+        )
+
+    def _sender(self):
+        """
+        Handle sending packets from send_buffer,
+        and trigger retransmissions when ACK times out.
+        """
+        _print(f"{self.name}: Started Sender\n", "-" * 50)
         while not self.closed:
-            print(f"{self.name}: listening")
             try:
-                packet, _ = self.sock.recvfrom()
-
-                # check data integrity
-                if md5(packet[HASH_LENGTH:]).digest() != packet[:HASH_LENGTH]:
-                    print(f"{self.name}: discarding corrupted packet")
+                if not self.send_buffer:
+                    sleep(0.01)
                     continue
 
-                # unpack header
-                header = unpack(">I??", packet[HASH_LENGTH:HEADER_LENGTH])
-                segment_id, is_ack, is_fin = header
+                # get packet to send from buffer:
+                # priority is first by send_time and then segment_id
+                with self.send_lock:
+                    send_time, segment_id, packet = self.send_buffer.popleft()
 
-                # unpack body
-                body = packet[HEADER_LENGTH:]
-
-                if is_ack:
-                    print(
-                        f"{self.name}: [ACK Rcvd] "
-                        f"SegId:{segment_id} "
-                        f"Bytes:{len(packet)} "
-                        f"Body:'{body.decode()}'"
-                    )
-                    # extract ack_seg_id from body
-                    try:
-                        ack_seg_id = int(body.decode("utf-8")[4:])
-                    except ValueError:
-                        if body.decode("utf-8") == "ACK-FIN":
-                            print(f"{self.name}: FIN got ACKd!")
+                    # packet was sent before and got already acknowledged: dont send again
+                    with self.ack_lock:
+                        if (
+                            segment_id <= self.ack_segment_id
+                            or segment_id in self.ack_buffer
+                        ):
+                            # do not put packet back into send_buffer
+                            # _print(
+                            #     f"{self.name}: [SNDBUF] POP({segment_id}) "
+                            #     f"-> {[p[:-1] for p in self.send_buffer]}",
+                            # )
+                            sleep(0.005)
                             continue
-                        else:
-                            assert False, "Unreachable"
 
-                    # ACK arrived in expected order
-                    if self.ack_segment_id + 1 == ack_seg_id:
-                        with self.lock:
-                            self.ack_segment_id = ack_seg_id
-                            # purge from send_buffer
-                            self.send_buffer.pop(ack_seg_id)
-                            # check if ACKs from buffer push frontier forward
-                            while self.ack_buffer and self.ack_segment_id + 1 == self.ack_buffer[0]:
-                                self.ack_segment_id = self.ack_buffer.popleft()
-                                self.send_buffer.pop(self.ack_segment_id)
+                    # packet was not sent before: send it now
+                    if send_time == 0.0:
+                        self.sock.sendto(packet, (self.dst_ip, self.dst_port))
+                        # put packet back into send_buffer with updated send_time
+                        insort_left(self.send_buffer, (time(), segment_id, packet))
+                        _print(
+                            f"{self.name}: [MSG Sent] [INITIAL TRANSMISSION] "
+                            f"SegId:{segment_id} "
+                            f"Bytes:{len(packet)} "
+                            f"Body:'{packet[HEADER_LENGTH:].decode()[:25]}'"
+                        )
+                        sleep(0.005)
+                        continue
 
-                    # ACK arrived out of order
-                    else:
-                        # TODO: this should never happen ?!
-                        if ack_seg_id <= self.ack_segment_id:
-                            print(f"{self.name}: Received ACK for retransmission {ack_seg_id}")
-                        elif ack_seg_id > self.ack_segment_id + 1:
-                            insort_left(self.ack_buffer, ack_seg_id)
-                        else:
-                            assert False, "Unreachable"
+                    # packet was sent before and ACK has timed out: resend it
+                    if time() - send_time >= ACK_TIMEOUT:
+                        self.sock.sendto(packet, (self.dst_ip, self.dst_port))
+                        # put packet back into send_buffer with updated send_time
+                        insort_left(self.send_buffer, (time(), segment_id, packet))
+                        _print(
+                            f"{self.name}: [MSG Sent] [ACK TIMEOUT RETRANSMISSION] "
+                            f"SegId:{segment_id} "
+                            f"Bytes:{len(packet)} "
+                            f"Body:'{packet[HEADER_LENGTH:].decode()[:25]}'"
+                        )
+                        sleep(0.005)
+                        continue
 
-                elif is_fin:
-                    print(
-                        f"{self.name}: [FIN Rcvd] "
-                        f"SegId:{segment_id} "
-                        f"Bytes:{len(packet)} "
-                        f"Body:'{body.decode()}'"
-                    )
-                    self.fin_received = True
-                    # discard FIN message - dont put into receive_buffer
-                    # # ACK FIN message
-                    ack_body = "ACK-FIN"
-                    self.send(ack_body.encode("utf-8"), is_ack=True)
-
-                else:
-                    if segment_id <= self.recv_segment_id:
-                        # received a retransmission -> resend ACK
-                        print(f"{self.name}: Resending ACK for received retransmission {segment_id}")
-                        ack_body = f"ACK-{segment_id}"
-                        self.send(ack_body.encode("utf-8"), is_ack=True)
-                    else:
-                        with self.lock:
-                            # received a new message -> add to receive_buffer
-                            _body = body.decode()
-                            _body = _body if len(_body) < 50 else f"{_body[:15]}...{_body[-15:]}"
-                            print(
-                                f"{self.name}: [MSG Rcvd] "
-                                f"SegId:{segment_id} "
-                                f"Bytes:{len(packet)} "
-                                f"Body:'{_body}'"
-                            )
-                            self.recv_buffer[segment_id] = body
-                            # send ACK for accepted message
-                            ack_body = f"ACK-{segment_id}"
-                            self.send(ack_body.encode("utf-8"), is_ack=True)
-
-
-                print(f"{self.name}: SND: {self.send_segment_id} {list(self.send_buffer.keys())}")
-                print(f"{self.name}: ACK: {self.ack_segment_id} {list(self.ack_buffer)}")
-                print(f"{self.name}: RCV: {self.recv_segment_id} {list(self.recv_buffer.keys())}")
+                    # packet was sent and ACK has not timed out yet: put packet back into send_buffer
+                    insort_left(self.send_buffer, (send_time, segment_id, packet))
+                    sleep(0.005)
 
             except Exception as e:
-                print(f"{self.name}: listener died!\n", e)
-                breakpoint()
-
-        print(f"{self.name}: Stop listening")
-
-    def send(self, data_bytes: bytes, is_ack: bool = False, is_fin: bool = False) -> None:
-        """
-        Note that data_bytes can be larger than one packet
-        """
-
-        # split message to fit into max packet size
-        for data_chunk in split_bytes(data_bytes, BODY_LENGTH):
-
-            # create header
-            header = pack(">I??", self.send_segment_id, is_ack, is_fin)
-
-            # assemble packet
-            packet = header + data_chunk
-
-            # prepend hash
-            packet = md5(packet).digest() + packet
-
-            # send packet
-            self.sock.sendto(packet, (self.dst_ip, self.dst_port))
-
-            if is_ack:
-                print(
-                    f"{self.name}: [ACK Sent] "
-                    f"SegId:{self.send_segment_id} "
-                    f"Bytes:{len(packet)} "
-                    f"Body:'{data_chunk.decode()}'"
-                )
-                return
-
-            if is_fin:
-                print(
-                    f"{self.name}: [FIN Sent] "
-                    f"SegId:{self.send_segment_id} "
-                    f"Bytes:{len(packet)} "
-                    f"Body:'{data_chunk.decode()}'"
-                )
-
-            else:
-                _body = data_chunk.decode()
-                _body = _body if len(_body) < 50 else f"{_body[:15]}...{_body[-15:]}"
-                print(
-                    f"{self.name}: [MSG Sent] "
-                    f"SegId:{self.send_segment_id} "
-                    f"Bytes:{len(packet)} "
-                    f"Body:'{_body}'"
-                )
-
-            # store message and ack_timer in send_buffer for possible retransmissions
-            with self.lock:
-                self.send_buffer[self.send_segment_id] = (packet, time())
-
-            # Wait if max num messages are in flight
-            while self.send_segment_id >= self.ack_segment_id + RECV_WINDOW_SIZE:
-                print(f"{self.name}: waiting for ACK", self.ack_segment_id + 1, end="\r")
-                sleep(0.1)
-
-                with self.lock:
-                    if (self.ack_segment_id + 1) not in self.send_buffer:
-                        break
-
-                    # check if oldest message got ACK before timeout, else resend message
-                    if time() - self.send_buffer[self.ack_segment_id + 1][1] >= ACK_TIMEOUT:
-                        lost_packet = self.send_buffer[self.ack_segment_id + 1][0]
-                        print(
-                            f"{self.name}: ACK Timout: resending: ",
-                            unpack(">I??", lost_packet[HASH_LENGTH:HEADER_LENGTH])[0],
-                        )
-                        self.sock.sendto(lost_packet, (self.dst_ip, self.dst_port))
-                        # reset ack_timer
-                        self.send_buffer[self.ack_segment_id + 1] = (lost_packet, time())
-
-            if not is_ack and not is_fin:
-                # increment send segment id
-                self.send_segment_id += 1
-
+                _print(f"{self.name}: Sender died!", e)
+        _print(f"{self.name}: Stopped Sender")
 
     def recv(self) -> bytes:
-        """Return contiguous data from receive_buffer"""
-        if not self.recv_buffer:
-            return b""
+        """
+        Return available valid data from receive_buffer.
+        """
+        contiguous_data = b""
 
-        with self.lock:
-            contiguous_data = b""
-            while self.recv_segment_id + 1 in self.recv_buffer:
-                self.recv_segment_id += 1
-                contiguous_data += self.recv_buffer.pop(self.recv_segment_id)
-            return contiguous_data
+        while self.recv_buffer:
+            with self.recv_lock:
+                # test if lowest segment id packet is the next expected one
+                segment_id, _, _, _, data = self.recv_buffer[0]
+                if self.recv_segment_id + 1 == segment_id:
+                    # if yes, append data and update recv_segment_id
+                    contiguous_data += data
+                    self.recv_segment_id = segment_id
+                    # pop packet from buffer
+                    _ = self.recv_buffer.popleft()
+                    continue
+                break
+            sleep(0.001)
 
+        return contiguous_data
+
+    def _listener(self):
+        """
+        Handle incoming messages:
+        - verify data integrity
+        - send ACK messages
+        - put non-ACK/FIN messages the into the receive buffer
+        """
+        _print(f"{self.name}: Started Listener")
+        while not self.closed:
+            try:
+                # This call is blocking
+                packet, _ = self.sock.recvfrom()
+
+                if packet_is_corrupt(packet):
+                    _print(f"{self.name}: Discarding corrupted packet")
+                    continue
+
+                segment_id, ack_flag, fin_flag, n_bytes, data = open_packet(packet)
+                ddata = data.decode("utf-8")[:25]
+
+                # Received MSG is an ACK
+                if ack_flag:
+                    _print(
+                        f"{self.name}: [ACK Rcvd] "
+                        f"SegId:{segment_id} "
+                        f"Bytes:{n_bytes} "
+                        f"Body:'{ddata}'"
+                    )
+
+                    # Update ack_buffer and ack_segment_id
+                    with self.ack_lock:
+                        ackd_segment_id = int(ddata.split(":")[-1])
+                        if ackd_segment_id not in self.ack_buffer:
+                            insort_left(self.ack_buffer, ackd_segment_id)
+                        while self.ack_buffer:
+                            if self.ack_segment_id + 1 == self.ack_buffer[0]:
+                                self.ack_segment_id = self.ack_buffer.popleft()
+                                continue
+                            break
+                    continue
+
+                # Received MSG is a FIN
+                if fin_flag:
+                    _print(
+                        f"{self.name}: [FIN Rcvd] "
+                        f"SegId:{segment_id} "
+                        f"Bytes:{n_bytes} "
+                        f"Body:'{ddata}'"
+                    )
+
+                    # Send ACK for received FIN
+                    self._send_ack(
+                        f"ACK-FIN:{segment_id}".encode("utf-8"),
+                        self.send_segment_id,
+                    )
+
+                    self.fin_received = True
+                    continue
+
+                # Received MSG is a retransmission: Resend ACK
+                with self.recv_lock:
+                    is_retransmission = (
+                        segment_id <= self.recv_segment_id
+                        or segment_id in [p[0] for p in self.recv_buffer]
+                    )
+                if is_retransmission:
+                    _print(
+                        f"{self.name}: [MSG Rcvd] [RETRANSMISSION] "
+                        f"SegId:{segment_id} "
+                        f"Bytes:{n_bytes} "
+                        f"Body:'{ddata}'"
+                    )
+                    self._send_ack(
+                        f"ACK-RTM:{segment_id}".encode("utf-8"),
+                        self.send_segment_id,
+                    )
+
+                    # Do not add packet to receive_buffer
+                    continue
+
+                # Received MSG is a new one: Send ACK, put into recv_buffer
+                _print(
+                    f"{self.name}: [MSG Rcvd] [NEW MSG] "
+                    f"SegId:{segment_id} "
+                    f"Bytes:{n_bytes} "
+                    f"Body:'{ddata}'"
+                )
+                self._send_ack(
+                    f"ACK:{segment_id}".encode("utf-8"),
+                    self.send_segment_id,
+                )
+
+                # Put packet into recv_buffer
+                with self.recv_lock:
+                    insort_left(
+                        self.recv_buffer,
+                        (segment_id, ack_flag, fin_flag, n_bytes, data),
+                    )
+                    # _print(
+                    #     f"{self.name}: [RCVBUF] PUT({segment_id}) "
+                    #     f"-> {[p[:-1] for p in self.recv_buffer]}",
+                    # )
+
+            except Exception as e:
+                _print(f"{self.name}: Listener died!", e)
+                # import traceback
+                # with open(f"log-{time()}.txt", "w") as f:
+                #     traceback._print_exc(file=f)
+
+        _print(f"{self.name}: Stopped listener")
 
     def close(self) -> None:
-        """Cleans up.
-        It should block (wait) until the Streamer is done with all
-        the necessary ACKs and retransmissions
         """
-        print(f"{self.name}: init connection teardown")
+        Cleans up.
+        It should block (wait) until the Streamer is done with all
+        necessary ACKs and retransmissions
+        """
+        _print(f"{self.name}: init connection teardown")
 
-        # Wait till all sent messages are ACKd
-        while self.send_buffer:
-            print(f"{self.name}: waiting for ACK", self.ack_segment_id + 1, end="\r")
-            sleep(0.1)
-
-            with self.lock:
-                if (self.ack_segment_id + 1) not in self.send_buffer:
+        # wait for all messages to be sent
+        while True:
+            with self.send_lock:
+                if not self.send_buffer:
                     break
+            print(f"{self.name}: Waiting for empty SNDBUF", end="\r")
+            sleep(0.01)
+        _print(f"{self.name}: SNDBUF is empty           ")
 
-                # check if oldest message got ACK before timeout, else resend message
-                if time() - self.send_buffer[self.ack_segment_id + 1][1] >= ACK_TIMEOUT:
-                    lost_packet = self.send_buffer[self.ack_segment_id + 1][0]
-                    print(
-                        f"{self.name}: ACK Timout: resending ",
-                        unpack(">I??", lost_packet[HASH_LENGTH:HEADER_LENGTH])[0],
-                    )
-                    self.sock.sendto(lost_packet, (self.dst_ip, self.dst_port))
-                    # reset ack_timer
-                    self.send_buffer[self.ack_segment_id + 1] = (lost_packet, time())
+        # wait for all messages to be ACKd
+        while True:
+            with self.send_lock, self.ack_lock:
+                if self.ack_segment_id == self.send_segment_id - 1:
+                    break
+            print(f"{self.name}: Waiting for all ACKs", end="\r")
+            sleep(0.01)
+        _print(f"{self.name}: All MSGs got ACKd           ")
 
-        # send FIN (needs to be ACKd)
-        fin_body = "FIN"
-        self.send(fin_body.encode("utf-8"), is_fin=True)
+        # send FIN
+        _print(f"{self.name}: SENDING FIN")
+        self.send(b"FIN", ack_flag=False, fin_flag=True)
 
-        # wait for other end FIN
-        while not self.fin_received:
-            sleep(0.1)
-            print(f"{self.name}: waiting for FIN", end="\r")
+        # wait for FIN to be ACKd
+        while True:
+            with self.send_lock, self.ack_lock:
+                if self.ack_segment_id == self.send_segment_id - 1:
+                    break
+            print(f"{self.name}: Waiting for FIN to be ACKd", end="\r")
+            sleep(0.01)
+        _print(f"{self.name}: RECEVIED FIN ACK                ")
 
-        # close connection after grace period
-        print(f"{self.name}: closing connection in 2 seconds...")
+        # wait 2 secs grace period
+        _print(f"{self.name}: Closing connection in 2 seconds...")
         sleep(2)
+
+
         self.closed = True
         self.sock.stoprecv()
+
+
+def split_bytes(data_bytes: bytes, chunk_size: int) -> Iterator[bytes]:
+    """
+    Split a bytes array into bytes arrays of size chunk_size.
+    """
+    for i in range(0, len(data_bytes), chunk_size):
+        yield data_bytes[i : i + chunk_size]
+
+
+def build_packet(data: bytes, segment_id: int, ack_flag: bool, fin_flag: bool):
+    """
+    Build a packet: Hash, Headers, Data.
+    """
+    header = pack(">I??", segment_id, ack_flag, fin_flag)
+    packet = header + data
+    packet_hash = md5(packet).digest()
+    packet = packet_hash + packet
+    return packet
+
+
+def packet_is_corrupt(packet):
+    """
+    Check if packet hash is valid.
+    """
+    if md5(packet[HASH_LENGTH:]).digest() != packet[:HASH_LENGTH]:
+        return True
+    return False
+
+
+def open_packet(packet):
+    """
+    Unpack packet: Headers, data.
+    """
+    n_bytes = len(packet)
+    header = unpack(">I??", packet[HASH_LENGTH:HEADER_LENGTH])
+    segment_id, is_ack, is_fin = header
+    body = packet[HEADER_LENGTH:]
+    return segment_id, is_ack, is_fin, n_bytes, body
